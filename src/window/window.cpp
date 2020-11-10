@@ -2,7 +2,8 @@
 
 void Window::init()
 {
-
+    glfwInit();
+    
 }
 
 void Window::show()

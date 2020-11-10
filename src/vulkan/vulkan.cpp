@@ -1,1 +1,11 @@
-#include"render.h"
+#include"vulkan.h"
+
+void Render::init()
+{
+    
+}
+
+void Render::destroy()
+{
+
+}

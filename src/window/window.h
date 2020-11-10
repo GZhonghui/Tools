@@ -1,6 +1,8 @@
 #ifndef WINDOW_H
 #define WINDOW_H
 
+#include"../vulkan/vulkan.h"
+
 class Window
 {
 protected:
