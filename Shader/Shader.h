@@ -41,6 +41,9 @@ protected:
             m_ShaderCode.push_back(read);
         }
 
+        // End of Char Buffer
+        m_ShaderCode.push_back(0);
+
         fclose(shaderFile);
         return true;
     }
