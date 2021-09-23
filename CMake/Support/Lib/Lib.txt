@@ -1,0 +1,14 @@
+C:\Users\mail\Desktop\CMake\Support\Lib>dir
+ Volume in drive C is Windows
+ Volume Serial Number is F6EE-7817
+
+ Directory of C:\Users\mail\Desktop\CMake\Support\Lib
+
+2021/09/23  19:32    <DIR>          .
+2021/09/23  19:32    <DIR>          ..
+2021/07/22  18:33         6,691,840 assimp.dll
+2021/07/22  18:33           374,310 assimp.lib
+2021/07/20  10:00           650,166 glfw3.lib
+2021/09/23  19:32                 0 Lib.txt
+               4 File(s)      7,716,316 bytes
+               2 Dir(s)  86,380,154,880 bytes free
