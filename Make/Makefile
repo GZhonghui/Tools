@@ -1,15 +1,31 @@
-all: Engine;
+all: Project
 
-Objects  = EngineCore.o
-Objects += EngineCoreEditorUI.o
+CC = g++
 
-Include = -I ../Support/Include
-Link = -l thread
+Target = Engine
 
-Flags = $(Include) $(Link) -Wall -O2 -c --std=c++17
+InclDir = -I Support/Include
 
-Engine: $(Objects); 
+LinkDir = Support/Lib
 
-g++ -MM EngineCore.cpp; -@ g++ $(Flags) EngineCore.cpp
+CompFlag = -Wall -O2 -c --std=c++17 $(InclDir)
+LinkFlag = -l pthread
 
-clean:; -@ rm ./*.o Engine
+Objects  = Main.o
+Objects += SupportA.o
+Objects += SupportB.o
+
+%.o: Project/%.cpp; -@ $(CC) -o $@ $< $(CompFlag)
+
+Project: $(Objects); -@ $(CC) $(LinkFlag) $(Objects) -o $(Target)
+
+Auto  = @set -e; rm -f $@;
+Auto += $(CC) -MM $(InclDir) $< > $@.$$$$;
+Auto += sed 's,\($*\)\.o[ :]*,\1.o $@ : ,g' < $@.$$$$ > $@;
+Auto += rm -f $@.$$$$
+
+%.d: Project/%.cpp; $(Auto)
+
+-include $(Objects:.o=.d)
+
+clean: ; -@ rm $(Target) $(Objects) $(Objects:.o=.d)
