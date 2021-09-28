@@ -1,0 +1,14 @@
+(Taichi37) D:\Codes\Git\Tools\GLFW\Support\Include>dir
+ Volume in drive D is Data
+ Volume Serial Number is B668-4EA3
+
+ Directory of D:\Codes\Git\Tools\GLFW\Support\Include
+
+2021/09/26  22:15    <DIR>          .
+2021/09/26  22:15    <DIR>          ..
+2021/09/26  22:15    <DIR>          glad
+2021/09/26  22:15    <DIR>          GLFW
+2021/09/26  22:15    <DIR>          ImGUI
+2021/09/26  22:15    <DIR>          KHR
+               0 File(s)              0 bytes
+               6 Dir(s)  142,987,472,896 bytes free
