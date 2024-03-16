@@ -1,15 +1,16 @@
 import os
 
 # editable
-target_dir = './data'
+target_dir = './data/'
 
 # editable
 def get_name(index: int):
-    return '2023_%04d'%(index)
+    return '2024_%04d'%(index+142)
 
 def solve(preview = True):
     files=os.listdir(target_dir)
-    files.sort()
+    files.sort(key=lambda x: os.path.getctime(os.path.join(target_dir, x)))
+    # files.sort()
 
     for i in range(len(files)):
         file = files[i]
