@@ -11,6 +11,7 @@ def solve(preview = True):
     files=os.listdir(target_dir)
     # files.sort(key=lambda x: os.path.getctime(os.path.join(target_dir, x)))
     files.sort()
+    files.remove('.DS_Store')
 
     for i in range(len(files)):
         file = files[i]
