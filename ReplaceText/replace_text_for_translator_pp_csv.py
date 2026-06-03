@@ -28,7 +28,8 @@ ENCODING = "utf-8-sig"
 SOURCE_COL = 0
 
 # 第 5 列：Best Translation
-TARGET_COL = 4
+# 但是应该输出到第二列，因为导入的时候只需要一列的目标值
+TARGET_COL = 1
 
 # 是否递归处理子文件夹
 RECURSIVE = True
