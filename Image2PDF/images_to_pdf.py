@@ -7,7 +7,7 @@ from PIL import Image
 def images_to_pdf(folder_path, output_pdf_path):
     # 获取所有图像文件，并按文件名排序
     image_files = sorted(
-        [f for f in os.listdir(folder_path) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+        [f for f in os.listdir(folder_path) if f.lower().endswith(('.png', '.jpg', '.jpeg', 'webp'))]
     )
 
     # 加载图像
