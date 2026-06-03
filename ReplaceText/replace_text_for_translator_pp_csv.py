@@ -22,7 +22,7 @@ FOLDER = Path.home() / "Downloads" / "TranslatorCSV"
 
 # 如果你的 CSV 是 GBK/CP936，保持 cp936
 # 如果是 UTF-8，就改成 "utf-8-sig"
-ENCODING = "cp936"
+ENCODING = "utf-8-sig"
 
 # 第 1 列：Original Text
 SOURCE_COL = 0
