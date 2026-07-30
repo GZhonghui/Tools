@@ -3,13 +3,20 @@
 # 失败自动重试的下载脚本
 #
 # 用法:
-#   ./download.sh                         # 用下面的默认远程/本地路径
-#   ./download.sh <远程路径> <本地路径>      # 临时换文件
+#   ./download.sh                         # 使用下面的默认远程/本地路径
+#   ./download.sh <远程路径> <本地路径>     # 临时更换远程/本地路径
 
+# ---------------- 可修改参数 ----------------
+
+DEFAULT_REMOTE="terabox-default:/movies/Heavensward.mp4"
+DEFAULT_DOWNLOAD_PATH="$HOME/downloads"
+RCLONE_BIN="rclone-extra"
+RCLONE_CONF="on"  # 设为 off 时不传递 --config
+RCLONE_CONF_PATH="$HOME/etc/rclone-extra/rclone.conf"
 DELAY=10        # 每次失败后等待的秒数
 MAX_RETRY=64    # 最大重试次数，0 表示无限重试
 
-RCLONE_CONF="$HOME/etc/rclone-extra/rclone.conf"
+# --------------------------------------------
 
 # Ctrl+C / kill 时立刻退出，不要被下面的重试循环接住
 trap 'echo "[retry] 收到中断信号，退出" >&2; exit 130' INT TERM
@@ -42,13 +49,18 @@ retry() {
 
 # ---------------- 以下是实际要跑的命令，按需修改 ----------------
 
-REMOTE="${1:-terabox-default:/movies/Heavensward.mp4}"
-LOCAL="${2:-$HOME/downloads/movies/Heavensward.mp4}"
+REMOTE="${1:-$DEFAULT_REMOTE}"
+LOCAL="${2:-$DEFAULT_DOWNLOAD_PATH}"
 
-retry rclone-extra copyto \
+CONFIG_ARGS=()
+if [ "$RCLONE_CONF" = "on" ]; then
+    CONFIG_ARGS=(--config "$RCLONE_CONF_PATH")
+fi
+
+retry "$RCLONE_BIN" copy \
     "$REMOTE" \
     "$LOCAL" \
     --progress \
-    --config "$RCLONE_CONF" || exit 1
+    "${CONFIG_ARGS[@]}" || exit 1
 
 echo "下载完成: $LOCAL"
