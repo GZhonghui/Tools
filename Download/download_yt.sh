@@ -5,7 +5,7 @@
 
 # ---- 配置：运行前按需修改 ----
 # 音频和视频共用下载目录；不存在时自动创建。相对路径以脚本执行位置为基准。
-readonly download_directory="$HOME/Downlaods"
+readonly download_directory="$HOME/Downloads"
 
 # 两种下载类型共享上传开关；关闭后不检查或调用 rclone。
 readonly upload_enabled=true
