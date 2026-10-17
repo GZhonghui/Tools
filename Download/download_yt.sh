@@ -3,9 +3,17 @@
 # 保存到配置的下载目录，并按开关上传到 rclone。
 # 兼容 Bash 3.2 及以上版本（包括 macOS 自带的 Bash）。
 
-readonly script_version='0.1.0'
+readonly script_version='0.2.0'
 
 # ---- 配置：运行前按需修改 ----
+# 仅 video 模式下载字幕；全部嵌入为可开关、可切换的软字幕，不烧录到画面。
+# 关闭下载后，源视频已经包含的字幕仍会保留。
+readonly subtitles_enabled=true
+# 用空格分隔语言代码，列表中所有可用语言都会下载，不按顺序择一。
+# zh 包含简体、繁体等全部变体；en 也包含地区变体。日语使用标准语言代码 ja。
+# 同一语言代码优先人工字幕，没有时使用网站提供的自动字幕（可能包含自动翻译）。
+readonly subtitle_languages='en zh ja'
+
 # 音频和视频共用下载目录；不存在时自动创建。相对路径以脚本执行位置为基准。
 readonly download_directory="$HOME/Downloads"
 
@@ -46,19 +54,22 @@ readonly video_max_resolution='1080p'
 # - 不自动填入专辑、日期等其他网页标签；标签和封面处理不重新编码音频。
 # - 封面转为 JPG 后嵌入，完成后删除临时图片；没有封面时保留无封面的 MP3。
 #
-# 视频流程：下载上限内实际可下载的最高视频 → 必要时合并音视频 → 转为 MP4 → 按开关上传。
+# 视频流程：下载可用字幕及上限内最高视频 → 必要时合并音视频 → 转为含软字幕的 MP4 → 按开关上传。
 # - 优先选择高度最高的格式；没有上限内的可用格式就失败，不下载超出上限的版本。
 # - 分离的音视频轨先由 FFmpeg 无损合并；不添加标签或封面。
-# - 下载或合并后已是 MP4 时跳过转码；其他格式由脚本直接调用 FFmpeg 转为 H.264/AAC MP4。
+# - 已是 MP4 时复制音视频轨嵌入新字幕；没有新字幕则直接复用。其他格式转为 H.264/AAC MP4。
+# - 转码时直接保留源视频的文字字幕轨，并把下载的字幕一并转为 MP4 的 mov_text 软字幕。
+# - 下载字幕临时保存为 SRT，处理结束清理；不存在或下载失败的字幕跳过，仍正常保存视频。
+# - 复用成品时更新本脚本嵌入的同语言字幕，避免重复添加；保留其他已有字幕轨。
 # - 音频和视频均在处理成功、保存成品后删除源文件；转码失败时保留源文件。
 #
 # 文件与失败处理：
 # - 成品命名为「原视频标题.扩展名」；文件系统不允许的字符由 yt-dlp 替换。
 # - 上传使用 rclone copy，音频和视频各用自己的目标目录，本地成品始终保留。
 # - 先提取信息，再复用同名成品或按提取结果下载，避免重复解析网页。
-# - 下载及后处理使用独立临时目录，完成后移入下载目录；退出时清理临时图片和元数据。
+# - 下载及后处理使用独立临时目录，完成后移入下载目录；退出时清理临时图片、字幕和元数据。
 # - 失败时保留已下载的媒体文件，移入下载目录；遇到同名冲突则留在临时目录并提示位置。
-# - 任一步失败都会停止后续 URL，返回非零退出码；处理失败的文件不会上传。
+# - 除跳过不可下载的字幕外，任一步失败都会停止后续 URL，返回非零退出码；处理失败的文件不会上传。
 # - 重跑时复用同名成品；音频会更新标签和封面。不同视频同名时应配置不同下载目录。
 # - yt-dlp 缺失时提示手动下载官方二进制，其余工具逐项给出 apt 安装命令。
 
@@ -70,6 +81,9 @@ usage() {
         '支持平台：YouTube、Bilibili。' \
         'audio：下载音频并转为 MP3，写入标题和频道名，嵌入封面并清理临时图片。' \
         'video：下载分辨率上限内的最高可用视频，必要时合并；非 MP4 由 FFmpeg 转码为 MP4，成功后删除原格式。' \
+        'video 按顶部开关下载语言列表中所有可用字幕；zh 包含简繁体，日语代码为 ja。' \
+        '不存在或下载失败的字幕会跳过，不影响其他字幕和视频下载。' \
+        '下载字幕和源视频的文字字幕均嵌入为软字幕；已是 MP4 时复制音视频轨，临时字幕在结束后清理。' \
         '音频和视频均由脚本直接调用 FFmpeg 转码，并实时显示处理进度。' \
         '必须指定 audio 或 video；文件按视频标题命名，保存到配置的下载目录。' \
         '音频和视频共用 download_directory；目录不存在时自动创建。' \
@@ -81,6 +95,7 @@ usage() {
         "$download_directory" "$cookies_file" "$video_max_resolution"
     printf '上传开关：%s\n音频上传目录：%s\n视频上传目录：%s\n' \
         "$upload_enabled" "$audio_upload_destination" "$video_upload_destination"
+    printf '字幕下载开关：%s\n字幕语言：%s\n' "$subtitles_enabled" "$subtitle_languages"
 }
 
 die() {
@@ -129,6 +144,40 @@ resolution_height() {
     esac
 }
 
+# yt-dlp 使用完整匹配的正则表达式；同时兼容 Bilibili 的 ai-zh 等字幕代码。
+subtitle_language_pattern() {
+    local language pattern=''
+    local -a languages
+    IFS=$' \t' read -r -a languages <<< "$subtitle_languages"
+    [[ -n "${languages[0]:-}" ]] || { printf '错误：subtitle_languages 不能为空。\n' >&2; return 1; }
+    for language in "${languages[@]}"; do
+        [[ "$language" =~ ^[a-z]{2,3}([-_][A-Za-z0-9]+)*$ ]] || \
+            { printf '错误：字幕语言代码无效：%s；请用空格分隔，如 en zh ja。\n' "$language" >&2; return 1; }
+        pattern+="${pattern:+,}(ai-)?${language}([-_].*)?"
+    done
+    printf '%s\n' "$pattern"
+}
+
+# MP4 的 language 标签使用三字母代码；完整语言变体另存入字幕轨名称。
+subtitle_mp4_language() {
+    local language=${1#ai-}
+    language=${language%%[-_]*}
+    case "$language" in
+        en) printf 'eng' ;; zh) printf 'zho' ;; ja) printf 'jpn' ;;
+        ko) printf 'kor' ;; fr) printf 'fra' ;; de) printf 'deu' ;;
+        es) printf 'spa' ;; pt) printf 'por' ;; it) printf 'ita' ;;
+        ru) printf 'rus' ;; ar) printf 'ara' ;; hi) printf 'hin' ;;
+        id) printf 'ind' ;; vi) printf 'vie' ;; th) printf 'tha' ;;
+        *)
+            if [[ "$language" =~ ^[a-z]{3}$ ]]; then
+                printf '%s' "$language"
+            else
+                printf 'und'
+            fi
+            ;;
+    esac
+}
+
 check_upload_remote() {
     local destination=$1 remote_name=${1%%:*} remotes remote
     [[ "$destination" == *:* && -n "$remote_name" ]] || die '上传目录必须使用「远端名:目录」格式。'
@@ -143,9 +192,10 @@ cleanup_download_files() (
     local directory=$1 output_directory=$2 artifact destination
     # 在子 Shell 中忽略扩展名大小写，兼容 Bash 3.2，且不改变调用方的匹配设置。
     shopt -s nocasematch
-    # .metadata 只存放本次生成的信息、封面和未完成的转码文件，不存放下载的源媒体。
+    # .metadata 只存放本次的信息、封面、临时字幕和未完成的转码文件，不存放源媒体。
     if [[ -d "$directory/.metadata" ]]; then
-        rm -f -- "$directory/.metadata/"* || printf '无法清理临时元数据：%s\n' "$directory/.metadata" >&2
+        rm -f -- "$directory/.metadata/"* "$directory/.metadata/".[!.]* "$directory/.metadata/"..?* || \
+            printf '无法清理临时元数据：%s\n' "$directory/.metadata" >&2
         rmdir -- "$directory/.metadata" 2>/dev/null || :
     fi
     # 只清理本次创建的临时目录，不触碰下载目录里的同名图片或已有媒体。
@@ -218,24 +268,80 @@ process_audio() {
 
 process_video() {
     local source=$1 destination=$2 work_directory=$3 temporary
+    local subtitle language input_index=0 subtitle_count=0 subtitle_indices index handler
+    local downloaded_languages='|' is_mp4=false
+    local -a command=(ffmpeg -hide_banner -nostdin -stats -y -i "$source")
+    local -a maps=(-map 0:v:0 -map '0:a?')
+    local -a subtitle_args=(-c:s mov_text)
+
+    for subtitle in "$work_directory"/subtitle.*; do
+        [[ -f "$subtitle" ]] || continue
+        [[ "$subtitle" == *.srt ]] || \
+            { printf '错误：字幕未能转为 SRT：%s\n' "$subtitle" >&2; return 1; }
+        language=${subtitle##*/}
+        language=${language#subtitle.}
+        language=${language%.srt}
+        command+=(-i "$subtitle")
+        downloaded_languages+="$language|"
+    done
+
     case "$source" in
-        *.[mM][pP]4)
+        *.[mM][pP]4) is_mp4=true ;;
+    esac
+    if [[ "$is_mp4" == true ]]; then
+        if [[ "$downloaded_languages" == '|' ]]; then
             printf '视频已是 MP4，跳过转码：%s\n' "$source"
             [[ "$source" != "$destination" ]] || return 0
             mv -n -- "$source" "$destination" || return 1
             [[ ! -e "$source" ]] || { printf '错误：成品已存在，未覆盖：%s\n' "$destination" >&2; return 1; }
-            ;;
-        *)
-            temporary=$(mktemp "$work_directory/transcode.XXXXXXXX") || return 1
-            printf '正在转码为 MP4：%s\n' "$source"
-            ffmpeg -hide_banner -nostdin -stats -y -i "$source" \
-                -map 0:v:0 -map '0:a?' -c:v libx264 -preset medium -crf 23 -c:a aac \
-                -map_metadata -1 -map_chapters -1 -movflags +faststart -f mp4 "$temporary" || return 1
-            mv -n -- "$temporary" "$destination" || return 1
-            [[ ! -e "$temporary" ]] || { printf '错误：成品已存在，未覆盖：%s\n' "$destination" >&2; return 1; }
-            rm -f -- "$source" || return 1
-            ;;
-    esac
+            return 0
+        fi
+        printf '视频已是 MP4，复制音视频轨并嵌入软字幕：%s\n' "$source"
+        command+=(-c:v copy -c:a copy)
+    else
+        printf '正在转码为 MP4，并保留软字幕：%s\n' "$source"
+        command+=(-c:v libx264 -preset medium -crf 23 -c:a aac)
+    fi
+
+    # 直接映射源字幕，无须先提取；显式保留字幕流标签，避免被全局元数据清理影响。
+    # 用 handler_name 标记下载字幕，仅在本次取得同语言新字幕时替换，避免重跑时重复添加。
+    subtitle_indices=$(ffprobe -v error -select_streams s -show_entries stream=index \
+        -of csv=p=0 "$source") || return 1
+    while IFS= read -r index; do
+        [[ -n "$index" ]] || continue
+        handler=$(ffprobe -v error -select_streams "$index" -show_entries stream_tags=handler_name \
+            -of default=noprint_wrappers=1:nokey=1 "$source") || return 1
+        if [[ "$handler" == yt-dlp:* && "$downloaded_languages" == *"|${handler#yt-dlp:}|"* ]]; then
+            continue
+        fi
+        maps+=(-map "0:$index" -map_metadata:s:s:"$subtitle_count" "0:s:$index")
+        subtitle_count=$((subtitle_count + 1))
+    done <<< "$subtitle_indices"
+    for subtitle in "$work_directory"/subtitle.*.srt; do
+        [[ -f "$subtitle" ]] || continue
+        language=${subtitle##*/}
+        language=${language#subtitle.}
+        language=${language%.srt}
+        input_index=$((input_index + 1))
+        maps+=(-map "$input_index:s:0")
+        subtitle_args+=(-metadata:s:s:"$subtitle_count" "language=$(subtitle_mp4_language "$language")"
+            -metadata:s:s:"$subtitle_count" "title=$language"
+            -metadata:s:s:"$subtitle_count" "handler_name=yt-dlp:$language"
+            -disposition:s:"$subtitle_count" 0)
+        subtitle_count=$((subtitle_count + 1))
+    done
+
+    temporary=$(mktemp "$work_directory/transcode.XXXXXXXX") || return 1
+    command+=("${maps[@]}" "${subtitle_args[@]}"
+        -map_metadata -1 -map_chapters -1 -movflags +faststart -f mp4 "$temporary")
+    "${command[@]}" || return 1
+    if [[ "$source" == "$destination" ]]; then
+        mv -f -- "$temporary" "$destination" || return 1
+    else
+        mv -n -- "$temporary" "$destination" || return 1
+        [[ ! -e "$temporary" ]] || { printf '错误：成品已存在，未覆盖：%s\n' "$destination" >&2; return 1; }
+        rm -f -- "$source" || return 1
+    fi
 }
 
 process_url() {
@@ -262,13 +368,32 @@ process_url() {
         --print-to-file 'video:%(channel,uploader|)s' "$metadata_directory/artist")
     if [[ "$mode" == audio ]]; then
         metadata_args+=(--write-thumbnail --output 'thumbnail:cover.%(ext)s')
+    elif [[ "$subtitles_enabled" == true ]]; then
+        local subtitle_pattern
+        subtitle_pattern=$(subtitle_language_pattern) || return 1
+        # 字幕只在信息提取阶段下载一次，复用已有 MP4 时也可补字幕。
+        # 连下载中的字幕都放入 .metadata，失败或中断后也能统一清理。
+        # 仅此阶段允许跳过下载失败的字幕；下方仍检查必要信息，媒体下载仍使用 --abort-on-error。
+        metadata_args+=(--ignore-errors --write-subs --write-auto-subs --sub-langs "$subtitle_pattern"
+            --sub-format 'srt/vtt/ass/ssa/ttml/best' --convert-subs srt
+            --paths "temp:$metadata_directory" --paths "subtitle:$metadata_directory"
+            --output 'subtitle:subtitle.%(ext)s')
     fi
-    "${download_command[@]}" "${common_args[@]}" "${metadata_args[@]}" -- "$url" || return 1
+    local metadata_status=0
+    "${download_command[@]}" "${common_args[@]}" "${metadata_args[@]}" -- "$url" || metadata_status=$?
+    if (( metadata_status != 0 )) && [[ "$mode" != video || "$subtitles_enabled" != true ]]; then
+        return "$metadata_status"
+    fi
 
     local filename title artist source destination extension cover=''
     # 每个字段单独读取至 EOF，只去掉 yt-dlp 追加的一个换行；保留标题内的换行和引号。
-    [[ -s "$metadata_directory/filename" && -f "$metadata_directory/media.info.json" ]] || \
+    [[ -s "$metadata_directory/filename" && -s "$metadata_directory/media.info.json" && \
+        -f "$metadata_directory/title" && -f "$metadata_directory/artist" ]] || \
         { printf '错误：未取得可处理的视频信息：%s\n' "$url" >&2; return 1; }
+    if (( metadata_status != 0 )); then
+        # 部分版本即使启用 --ignore-errors，字幕下载失败后仍返回非零，但已保存有效视频信息。
+        printf '提示：字幕准备阶段报告错误；视频信息已取得，将继续处理可用字幕和视频。\n' >&2
+    fi
     IFS= read -r -d '' filename < "$metadata_directory/filename" || :
     IFS= read -r -d '' title < "$metadata_directory/title" || :
     IFS= read -r -d '' artist < "$metadata_directory/artist" || :
@@ -345,6 +470,11 @@ main() {
         mode_label='音频（MP3，含标题、频道名和可用封面）'
         upload_destination=$audio_upload_destination
     else
+        case "$subtitles_enabled" in
+            true) subtitle_language_pattern >/dev/null || return 1 ;;
+            false) ;;
+            *) die '请将 subtitles_enabled 设置为 true 或 false。' ;;
+        esac
         max_height=$(resolution_height "$video_max_resolution") || return 1
         mode_label="视频（MP4，高度不超过 ${max_height} 像素）"
         upload_destination=$video_upload_destination
@@ -402,6 +532,9 @@ main() {
         '提醒：请及时将 yt-dlp 升级到最新版本，旧版本可能因网站变更而无法下载。' \
         '新版下载：https://github.com/yt-dlp/yt-dlp/releases/latest'
     printf '下载类型：%s\n下载目录：%s\n' "$mode_label" "$download_directory"
+    if [[ "$mode" == video ]]; then
+        printf '字幕下载开关：%s\n字幕语言：%s\n' "$subtitles_enabled" "$subtitle_languages"
+    fi
     if [[ "$upload_enabled" == true ]]; then
         printf '上传目录：%s\n' "$upload_destination"
     else
