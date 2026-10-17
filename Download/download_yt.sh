@@ -3,6 +3,8 @@
 # 保存到配置的下载目录，并按开关上传到 rclone。
 # 兼容 Bash 3.2 及以上版本（包括 macOS 自带的 Bash）。
 
+readonly script_version='0.1.0'
+
 # ---- 配置：运行前按需修改 ----
 # 音频和视频共用下载目录；不存在时自动创建。相对路径以脚本执行位置为基准。
 readonly download_directory="$HOME/Downloads"
@@ -39,7 +41,7 @@ readonly video_max_resolution='1080p'
 # Cookie 需要用户自行导出、更新；携带 Cookie 不保证网站一定允许下载。
 #
 # 音频流程：下载最佳独立音轨 → 转为 MP3 → 写入标签 → 嵌入封面 → 按开关上传。
-# - 已是 MP3 时跳过转码；其他格式由 FFmpeg 以高质量 VBR 转换，成功后删除原格式。
+# - 脚本直接调用 FFmpeg 并显示进度；已有 MP3 复制音轨，其他格式以最高质量 VBR 转换。
 # - title 使用视频标题，artist 使用频道名；无频道名时用上传者名称，再缺失则留空。
 # - 不自动填入专辑、日期等其他网页标签；标签和封面处理不重新编码音频。
 # - 封面转为 JPG 后嵌入，完成后删除临时图片；没有封面时保留无封面的 MP3。
@@ -47,12 +49,14 @@ readonly video_max_resolution='1080p'
 # 视频流程：下载上限内实际可下载的最高视频 → 必要时合并音视频 → 转为 MP4 → 按开关上传。
 # - 优先选择高度最高的格式；没有上限内的可用格式就失败，不下载超出上限的版本。
 # - 分离的音视频轨先由 FFmpeg 无损合并；不添加标签或封面。
-# - 下载或合并后已是 MP4 时跳过转码；其他格式由 FFmpeg 重新编码为 MP4，成功后删除原格式。
+# - 下载或合并后已是 MP4 时跳过转码；其他格式由脚本直接调用 FFmpeg 转为 H.264/AAC MP4。
+# - 音频和视频均在处理成功、保存成品后删除源文件；转码失败时保留源文件。
 #
 # 文件与失败处理：
 # - 成品命名为「原视频标题.扩展名」；文件系统不允许的字符由 yt-dlp 替换。
 # - 上传使用 rclone copy，音频和视频各用自己的目标目录，本地成品始终保留。
-# - 下载及后处理使用独立临时目录，完成后移入下载目录；退出时清理临时图片。
+# - 先提取信息，再复用同名成品或按提取结果下载，避免重复解析网页。
+# - 下载及后处理使用独立临时目录，完成后移入下载目录；退出时清理临时图片和元数据。
 # - 失败时保留已下载的媒体文件，移入下载目录；遇到同名冲突则留在临时目录并提示位置。
 # - 任一步失败都会停止后续 URL，返回非零退出码；处理失败的文件不会上传。
 # - 重跑时复用同名成品；音频会更新标签和封面。不同视频同名时应配置不同下载目录。
@@ -66,6 +70,7 @@ usage() {
         '支持平台：YouTube、Bilibili。' \
         'audio：下载音频并转为 MP3，写入标题和频道名，嵌入封面并清理临时图片。' \
         'video：下载分辨率上限内的最高可用视频，必要时合并；非 MP4 由 FFmpeg 转码为 MP4，成功后删除原格式。' \
+        '音频和视频均由脚本直接调用 FFmpeg 转码，并实时显示处理进度。' \
         '必须指定 audio 或 video；文件按视频标题命名，保存到配置的下载目录。' \
         '音频和视频共用 download_directory；目录不存在时自动创建。' \
         '两种模式都强制使用脚本顶部配置的 Netscape 格式 Cookie 文件。' \
@@ -138,6 +143,11 @@ cleanup_download_files() (
     local directory=$1 output_directory=$2 artifact destination
     # 在子 Shell 中忽略扩展名大小写，兼容 Bash 3.2，且不改变调用方的匹配设置。
     shopt -s nocasematch
+    # .metadata 只存放本次生成的信息、封面和未完成的转码文件，不存放下载的源媒体。
+    if [[ -d "$directory/.metadata" ]]; then
+        rm -f -- "$directory/.metadata/"* || printf '无法清理临时元数据：%s\n' "$directory/.metadata" >&2
+        rmdir -- "$directory/.metadata" 2>/dev/null || :
+    fi
     # 只清理本次创建的临时目录，不触碰下载目录里的同名图片或已有媒体。
     for artifact in "$directory"/* "$directory"/.[!.]* "$directory"/..?*; do
         [[ -f "$artifact" ]] || continue
@@ -161,12 +171,6 @@ cleanup_download_files() (
 download_audio() {
     yt-dlp \
         --format bestaudio \
-        --extract-audio --audio-format mp3 --audio-quality 0 --no-keep-video \
-        --embed-metadata --no-embed-chapters --no-embed-info-json \
-        --parse-metadata ':(?P<meta_>)' \
-        --parse-metadata 'title:(?s)(?P<meta_title>.*)' \
-        --parse-metadata '%(channel,uploader|)s:(?s)(?P<meta_artist>.*)' \
-        --convert-thumbnails jpg --embed-thumbnail \
         "$@"
 }
 
@@ -178,11 +182,139 @@ download_video() {
     yt-dlp \
         --format "bv*[height<=$max_height]+ba/b[height<=$max_height]" \
         --format-sort-force --format-sort height \
-        --recode-video mp4 --no-keep-video \
         "$@"
 }
 
+# FFmpeg 直接继承终端输出，-stats 显示 time、speed 等实时进度。
+# 转码写入独立临时文件，只有完整成功后才替换成品并删除源文件。
+process_audio() {
+    local source=$1 destination=$2 title=$3 artist=$4 cover=$5 work_directory=$6
+    local codec temporary
+    codec=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name \
+        -of default=noprint_wrappers=1:nokey=1 "$source") || return 1
+    [[ -n "$codec" ]] || { printf '错误：文件中没有可用音轨：%s\n' "$source" >&2; return 1; }
+    temporary=$(mktemp "$work_directory/transcode.XXXXXXXX") || return 1
+    local -a command=(ffmpeg -hide_banner -nostdin -stats -y -i "$source")
+    if [[ -f "$cover" ]]; then
+        command+=(-i "$cover" -map 0:a:0 -map 1:v:0 -c:v mjpeg -disposition:v:0 attached_pic
+            -metadata:s:v:0 'title=Album cover' -metadata:s:v:0 'comment=Cover (front)')
+    else
+        # 没有新封面时，保留已有 MP3 中的封面。
+        command+=(-map 0:a:0 -map '0:v?' -c:v copy)
+    fi
+    if [[ "$codec" == mp3 ]]; then
+        printf '音轨已是 MP3，复制音轨并更新标签和封面：%s\n' "$source"
+        command+=(-c:a copy)
+    else
+        printf '正在转码为 MP3：%s\n' "$source"
+        command+=(-c:a libmp3lame -q:a 0)
+    fi
+    command+=(-map_metadata -1 -map_metadata:s -1 -map_chapters -1
+        -metadata "title=$title" -metadata "artist=$artist" -id3v2_version 3 -f mp3 "$temporary")
+    "${command[@]}" || return 1
+    mv -f -- "$temporary" "$destination" || return 1
+    [[ "$source" == "$destination" ]] || rm -f -- "$source" || return 1
+}
+
+process_video() {
+    local source=$1 destination=$2 work_directory=$3 temporary
+    case "$source" in
+        *.[mM][pP]4)
+            printf '视频已是 MP4，跳过转码：%s\n' "$source"
+            [[ "$source" != "$destination" ]] || return 0
+            mv -n -- "$source" "$destination" || return 1
+            [[ ! -e "$source" ]] || { printf '错误：成品已存在，未覆盖：%s\n' "$destination" >&2; return 1; }
+            ;;
+        *)
+            temporary=$(mktemp "$work_directory/transcode.XXXXXXXX") || return 1
+            printf '正在转码为 MP4：%s\n' "$source"
+            ffmpeg -hide_banner -nostdin -stats -y -i "$source" \
+                -map 0:v:0 -map '0:a?' -c:v libx264 -preset medium -crf 23 -c:a aac \
+                -map_metadata -1 -map_chapters -1 -movflags +faststart -f mp4 "$temporary" || return 1
+            mv -n -- "$temporary" "$destination" || return 1
+            [[ ! -e "$temporary" ]] || { printf '错误：成品已存在，未覆盖：%s\n' "$destination" >&2; return 1; }
+            rm -f -- "$source" || return 1
+            ;;
+    esac
+}
+
+process_url() {
+    local mode=$1 max_height=$2 url=$3 js_runtime=$4 upload_destination=$5
+    local metadata_directory="$download_tmp_dir/.metadata"
+    mkdir -p -- "$metadata_directory" || return 1
+    local -a download_command common_args metadata_args
+    if [[ "$mode" == audio ]]; then
+        download_command=(download_audio)
+    else
+        download_command=(download_video "$max_height")
+    fi
+    common_args=(
+        --ignore-config --no-playlist --abort-on-error
+        --no-overwrites --no-windows-filenames --no-simulate --check-formats
+        --cookies "$cookies_file"
+        --paths "home:$download_tmp_dir" --paths "temp:$download_tmp_dir"
+        --paths "thumbnail:$metadata_directory" --output '%(title)s.%(ext)s'
+    )
+    [[ -z "$js_runtime" ]] || common_args+=(--js-runtimes "$js_runtime")
+    metadata_args=(--skip-download --write-info-json --output "infojson:$metadata_directory/media.%(ext)s"
+        --print-to-file 'video:%(filename)s' "$metadata_directory/filename"
+        --print-to-file 'video:%(title)s' "$metadata_directory/title"
+        --print-to-file 'video:%(channel,uploader|)s' "$metadata_directory/artist")
+    if [[ "$mode" == audio ]]; then
+        metadata_args+=(--write-thumbnail --output 'thumbnail:cover.%(ext)s')
+    fi
+    "${download_command[@]}" "${common_args[@]}" "${metadata_args[@]}" -- "$url" || return 1
+
+    local filename title artist source destination extension cover=''
+    # 每个字段单独读取至 EOF，只去掉 yt-dlp 追加的一个换行；保留标题内的换行和引号。
+    [[ -s "$metadata_directory/filename" && -f "$metadata_directory/media.info.json" ]] || \
+        { printf '错误：未取得可处理的视频信息：%s\n' "$url" >&2; return 1; }
+    IFS= read -r -d '' filename < "$metadata_directory/filename" || :
+    IFS= read -r -d '' title < "$metadata_directory/title" || :
+    IFS= read -r -d '' artist < "$metadata_directory/artist" || :
+    filename=${filename%$'\n'}
+    title=${title%$'\n'}
+    artist=${artist%$'\n'}
+    extension=mp4
+    [[ "$mode" != audio ]] || extension=mp3
+    filename=${filename##*/}
+    destination="$download_directory/${filename%.*}.$extension"
+    if [[ -f "$destination" ]]; then
+        printf '复用已有成品：%s\n' "$destination"
+        source=$destination
+    elif [[ -f "$download_directory/$filename" ]]; then
+        # 上次处理失败时保留的源文件可直接重试，成功后同样删除。
+        source="$download_directory/$filename"
+        printf '复用已下载的源文件：%s\n' "$source"
+    else
+        # 从刚提取的信息下载，不再请求网页解析；实际路径在合并完成后记录。
+        "${download_command[@]}" "${common_args[@]}" --no-write-thumbnail \
+            --load-info-json "$metadata_directory/media.info.json" \
+            --print-to-file 'after_move:%(filepath)s' "$metadata_directory/downloaded" || return 1
+        [[ -s "$metadata_directory/downloaded" ]] || return 1
+        IFS= read -r -d '' source < "$metadata_directory/downloaded" || :
+        source=${source%$'\n'}
+    fi
+    [[ -f "$source" ]] || { printf '错误：找不到已下载的媒体：%s\n' "$source" >&2; return 1; }
+    if [[ "$mode" == audio ]]; then
+        local thumbnail
+        for thumbnail in "$metadata_directory"/cover.*; do
+            [[ -f "$thumbnail" ]] || continue
+            cover=$thumbnail
+            break
+        done
+        # FFmpeg 在嵌入时把封面编码为 JPEG，不重新编码已有 MP3 音轨。
+        process_audio "$source" "$destination" "$title" "$artist" "$cover" "$metadata_directory" || return 1
+    else
+        process_video "$source" "$destination" "$metadata_directory" || return 1
+    fi
+    if [[ "$upload_enabled" == true ]]; then
+        rclone copy --progress -- "$destination" "$upload_destination" || return 1
+    fi
+}
+
 main() {
+    printf 'download_yt.sh 版本：%s\n' "$script_version"
     if (( $# == 1 )) && [[ "$1" == '-h' || "$1" == '--help' ]]; then
         usage
         return 0
@@ -209,16 +341,13 @@ main() {
     esac
 
     local upload_destination mode_label max_height=''
-    local -a download_command
     if [[ "$mode" == audio ]]; then
         mode_label='音频（MP3，含标题、频道名和可用封面）'
         upload_destination=$audio_upload_destination
-        download_command=(download_audio)
     else
         max_height=$(resolution_height "$video_max_resolution") || return 1
         mode_label="视频（MP4，高度不超过 ${max_height} 像素）"
         upload_destination=$video_upload_destination
-        download_command=(download_video "$max_height")
     fi
 
     local -a required_tools=(yt-dlp ffmpeg ffprobe mkdir mktemp rm mv rmdir)
@@ -260,30 +389,14 @@ main() {
 
     if [[ "$upload_enabled" == true ]]; then
         check_upload_remote "$upload_destination"
-        export DOWNLOAD_MEDIA_UPLOAD_DESTINATION="$upload_destination"
     fi
 
     # EXIT trap 在 main 返回后仍需访问此路径，因此它是唯一的全局运行时状态。
-    download_tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/download-media-work.XXXXXXXX") || die '无法创建下载临时目录。'
-    trap 'cleanup_download_files "$download_tmp_dir" "$download_directory"' EXIT
+    download_tmp_dir=''
+    trap '[[ -z "$download_tmp_dir" ]] || cleanup_download_files "$download_tmp_dir" "$download_directory"' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
-    local -a common_args=(
-        --ignore-config --no-playlist --abort-on-error
-        --no-overwrites --no-windows-filenames --no-simulate --check-formats
-        --cookies "$cookies_file"
-        --paths "home:$download_directory"
-        --paths "temp:$download_tmp_dir"
-        --paths "thumbnail:$download_tmp_dir"
-        --output '%(title)s.%(ext)s'
-    )
-    # 可选参数按需追加，避免 Bash 3.2 在 set -u 下展开空数组时报错。
-    [[ -z "$js_runtime" ]] || common_args+=(--js-runtimes "$js_runtime")
-    if [[ "$upload_enabled" == true ]]; then
-        # 成品移到下载目录后才上传；路径由 yt-dlp 引用，目标通过环境变量传递。
-        common_args+=(--exec 'after_move:rclone copy --progress -- %(filepath)q "$DOWNLOAD_MEDIA_UPLOAD_DESTINATION"')
-    fi
     printf 'yt-dlp：%s（%s）\n' "$yt_dlp_version" "$(command -v yt-dlp)"
     printf '%s\n' \
         '提醒：请及时将 yt-dlp 升级到最新版本，旧版本可能因网站变更而无法下载。' \
@@ -296,16 +409,21 @@ main() {
     fi
 
     local status
-    if "${download_command[@]}" "${common_args[@]}" -- "$@"; then
-        printf '处理完成，本地成品保留在：%s\n' "$download_directory"
-    else
-        status=$?
-        printf '下载、处理或上传失败，请查看上方错误；已下载的媒体文件会保留。\n' >&2
-        if [[ "$upload_enabled" == true ]]; then
-            printf '若仅上传失败，可重跑相同命令，或运行：rclone copy --progress -- "本地文件路径" %q\n' "$upload_destination" >&2
+    for url in "$@"; do
+        download_tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/download-media-work.XXXXXXXX") || die '无法创建下载临时目录。'
+        if process_url "$mode" "$max_height" "$url" "$js_runtime" "$upload_destination"; then
+            cleanup_download_files "$download_tmp_dir" "$download_directory"
+            download_tmp_dir=''
+        else
+            status=$?
+            printf '下载、处理或上传失败，请查看上方错误；已下载的媒体文件会保留。\n' >&2
+            if [[ "$upload_enabled" == true ]]; then
+                printf '若仅上传失败，可重跑相同命令，或运行：rclone copy --progress -- "本地文件路径" %q\n' "$upload_destination" >&2
+            fi
+            return "$status"
         fi
-        return "$status"
-    fi
+    done
+    printf '处理完成，本地成品保留在：%s\n' "$download_directory"
 }
 
 main "$@"
