@@ -44,10 +44,10 @@ readonly video_max_resolution='1080p'
 # - 不自动填入专辑、日期等其他网页标签；标签和封面处理不重新编码音频。
 # - 封面转为 JPG 后嵌入，完成后删除临时图片；没有封面时保留无封面的 MP3。
 #
-# 视频流程：下载上限内实际可下载的最高视频 → 必要时合并音视频 → 按开关上传。
+# 视频流程：下载上限内实际可下载的最高视频 → 必要时合并音视频 → 转为 MP4 → 按开关上传。
 # - 优先选择高度最高的格式；没有上限内的可用格式就失败，不下载超出上限的版本。
-# - 分离的音视频轨由 FFmpeg 无损合并；不转码、不添加标签或封面。
-# - 保留下载或合并所得的容器格式，不强制统一为 MP4。
+# - 分离的音视频轨先由 FFmpeg 无损合并；不添加标签或封面。
+# - 下载或合并后已是 MP4 时跳过转码；其他格式由 FFmpeg 重新编码为 MP4，成功后删除原格式。
 #
 # 文件与失败处理：
 # - 成品命名为「原视频标题.扩展名」；文件系统不允许的字符由 yt-dlp 替换。
@@ -65,7 +65,7 @@ usage() {
     printf '%s\n' \
         '支持平台：YouTube、Bilibili。' \
         'audio：下载音频并转为 MP3，写入标题和频道名，嵌入封面并清理临时图片。' \
-        'video：下载分辨率上限内的最高可用视频，仅在需要时无损合并音视频。' \
+        'video：下载分辨率上限内的最高可用视频，必要时合并；非 MP4 由 FFmpeg 转码为 MP4，成功后删除原格式。' \
         '必须指定 audio 或 video；文件按视频标题命名，保存到配置的下载目录。' \
         '音频和视频共用 download_directory；目录不存在时自动创建。' \
         '两种模式都强制使用脚本顶部配置的 Netscape 格式 Cookie 文件。' \
@@ -178,6 +178,7 @@ download_video() {
     yt-dlp \
         --format "bv*[height<=$max_height]+ba/b[height<=$max_height]" \
         --format-sort-force --format-sort height \
+        --recode-video mp4 --no-keep-video \
         "$@"
 }
 
@@ -215,7 +216,7 @@ main() {
         download_command=(download_audio)
     else
         max_height=$(resolution_height "$video_max_resolution") || return 1
-        mode_label="视频（高度不超过 ${max_height} 像素）"
+        mode_label="视频（MP4，高度不超过 ${max_height} 像素）"
         upload_destination=$video_upload_destination
         download_command=(download_video "$max_height")
     fi
@@ -283,8 +284,11 @@ main() {
         # 成品移到下载目录后才上传；路径由 yt-dlp 引用，目标通过环境变量传递。
         common_args+=(--exec 'after_move:rclone copy --progress -- %(filepath)q "$DOWNLOAD_MEDIA_UPLOAD_DESTINATION"')
     fi
-    printf 'yt-dlp：%s（%s）\n下载类型：%s\n下载目录：%s\n' \
-        "$yt_dlp_version" "$(command -v yt-dlp)" "$mode_label" "$download_directory"
+    printf 'yt-dlp：%s（%s）\n' "$yt_dlp_version" "$(command -v yt-dlp)"
+    printf '%s\n' \
+        '提醒：请及时将 yt-dlp 升级到最新版本，旧版本可能因网站变更而无法下载。' \
+        '新版下载：https://github.com/yt-dlp/yt-dlp/releases/latest'
+    printf '下载类型：%s\n下载目录：%s\n' "$mode_label" "$download_directory"
     if [[ "$upload_enabled" == true ]]; then
         printf '上传目录：%s\n' "$upload_destination"
     else
