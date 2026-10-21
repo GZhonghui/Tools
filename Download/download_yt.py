@@ -3,6 +3,10 @@
 
 Python 3.9+，仅使用标准库；下载、转码和上传仍调用独立的命令行工具。
 用法：python3 Download/download_yt.py <audio|video> "URL" ["URL" ...]
+
+中间文件不保留：成功、失败，以及 Ctrl+C / SIGTERM 中断时，均清理本次工作目录。
+清理范围包括 .part、.aria2、未合并音视频、转码文件、字幕、封面、元数据和 Cookie 副本；
+不会把中间文件移入下载目录，也不保留用于下次续传。只保留处理完成的成品，上传失败也保留。
 """
 
 from __future__ import annotations
@@ -23,7 +27,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
 
-SCRIPT_VERSION = "0.3.1"
+SCRIPT_VERSION = "0.3.4"
 
 
 # ---- 配置：运行前按需修改 ----
@@ -43,6 +47,12 @@ class Config:
     # 两种模式共用目录，不存在时创建；相对路径以执行位置为基准。
     download_directory: Path = Path.home() / "Downloads"
 
+    # 音频、视频共用：开启后使用 aria2c 多连接下载，需先安装 aria2。
+    # 每个文件最多使用 1～16 个连接；DASH/HLS 分片使用相同数量的并发。
+    # 小文件或服务器不支持时，实际连接数可能更少；视频仍按顺序逐个下载。
+    multithread_enabled: bool = False
+    download_connections: int = 8
+
     # 关闭上传后不检查或调用 rclone；copy 上传后始终保留本地成品。
     upload_enabled: bool = True
     audio_upload_destination: str = "dbx:upload/downloaded_audio"
@@ -50,21 +60,18 @@ class Config:
 
     # 必须提供可读、非空的 Netscape 格式 Cookie；源文件只读，临时副本在结束后清理。
     # 手动导出（需先登录网站，chrome 可替换为 firefox）：
-    # mkdir -p "$HOME/.zh/etc/yt-dlp"
-    # yt-dlp --cookies-from-browser chrome --cookies "$HOME/.zh/etc/yt-dlp/yt-bili.txt"
-    # 修改路径时同步修改导出命令；导出的文件可能包含其他网站的 Cookie，请勿分享或提交。
+    # yt-dlp --ignore-config --cookies-from-browser chrome --cookies "/新文件路径/cookies.txt" --skip-download "视频 URL"
+    # 必须导出到不存在的新文件，再移至下方配置路径，避免旧文件中的 Cookie 覆盖浏览器的新值。
+    # 导出的文件可能包含其他网站的 Cookie，请勿分享或提交。
     cookies_file: Path = Path.home() / ".zh/etc/yt-dlp/yt-bili.txt"
 
-    # 仅 video：最高高度，支持 1080p、1440p、4k、8k 或纯像素数，竖屏也按高度。
+    # 仅 video：按短边限制分辨率，支持 1080p、1440p、4k、8k 或纯像素数。
+    # 4k 对应短边 2160：3840×2160 横屏和 2160×3840 竖屏均可选择。
     video_max_resolution: str = "1080p"
 
 
 CONFIG = Config()
 
-IMAGE_EXTENSIONS = {
-    ".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif", ".bmp",
-    ".tif", ".tiff", ".ico",
-}
 MP4_LANGUAGES = {
     "en": "eng", "zh": "zho", "ja": "jpn", "ko": "kor", "fr": "fra",
     "de": "deu", "es": "spa", "pt": "por", "it": "ita", "ru": "rus",
@@ -93,7 +100,7 @@ def run(command, *, capture: bool = False, check: bool = True):
     try:
         stdout, _ = process.communicate()
     except BaseException:
-        # yt-dlp 也可能启动 FFmpeg；取消时一并停止，之后再清理或移动源媒体。
+        # yt-dlp 也可能启动 aria2c / FFmpeg；取消时一并停止，再清理本次临时文件。
         try:
             if os.name == "posix":
                 os.killpg(process.pid, signal.SIGTERM)
@@ -124,7 +131,7 @@ def run(command, *, capture: bool = False, check: bool = True):
     return result
 
 
-def resolution_height(resolution: str) -> int:
+def resolution_limit(resolution: str) -> int:
     if resolution.lower() in ("4k", "8k"):
         return {"4k": 2160, "8k": 4320}[resolution.lower()]
     if not re.fullmatch(r"[1-9][0-9]{0,4}[pP]?", resolution):
@@ -132,6 +139,22 @@ def resolution_height(resolution: str) -> int:
             "video_max_resolution 格式无效，请使用 1080p、1440p、4k、8k 或正整数像素数。"
         )
     return int(resolution.rstrip("pP"))
+
+
+def check_video_resolution(info: dict, limit: int) -> None:
+    # 与 yt-dlp 的 res 排序一致，按已知宽高中较小的数值处理横屏和竖屏。
+    dimensions = [
+        value for value in (info.get("width"), info.get("height"))
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+    ]
+    if not dimensions:
+        raise DownloadError("未取得视频宽高，无法确认分辨率是否在配置上限内。")
+    if min(dimensions) > limit:
+        # res:上限 在没有符合条件的格式时仍会选择较高分辨率，必须在媒体下载前拦截。
+        raise DownloadError(f"没有短边不超过 {limit} 像素的可用视频格式；未下载超出上限的视频。")
+    width, height = info.get("width") or "?", info.get("height") or "?"
+    note = info.get("format_note") or info.get("format_id") or ""
+    say(f"选中视频格式：{width}×{height}{f'（{note}）' if note else ''}")
 
 
 def subtitle_language_pattern(languages: str) -> str:
@@ -170,15 +193,22 @@ def yt_dlp_install_hint() -> None:
     )
 
 
-def check_tools(upload_enabled: bool) -> None:
+def check_tools(upload_enabled: bool, multithread_enabled: bool = False) -> None:
+    required = ("yt-dlp", "ffmpeg", "ffprobe")
+    if upload_enabled:
+        required += ("rclone",)
+    if multithread_enabled:
+        required += ("aria2c",)
     missing = [
-        tool for tool in ("yt-dlp", "ffmpeg", "ffprobe") + (("rclone",) if upload_enabled else ())
-        if shutil.which(tool) is None
+        tool for tool in required if shutil.which(tool) is None
     ]
     for tool in missing:
         say(f"缺少工具：{tool}", error=True)
         if tool == "yt-dlp":
             yt_dlp_install_hint()
+        elif tool == "aria2c":
+            command = "brew install aria2" if sys.platform == "darwin" else "sudo apt install aria2"
+            say(f"  安装命令：{command}", error=True)
         else:
             package = "ffmpeg" if tool == "ffprobe" else tool
             say(f"  安装命令：sudo apt install {package}", error=True)
@@ -195,14 +225,18 @@ def validate_config(config: Config, mode: str) -> Config:
         raise DownloadError(f"Cookie 文件不可读或为空：{cookies}")
     if not str(config.download_directory):
         raise DownloadError("download_directory 不能为空。")
-    switches = ["filename_timestamp_enabled", "filename_id_enabled", "upload_enabled"]
+    switches = ["filename_timestamp_enabled", "filename_id_enabled", "upload_enabled", "multithread_enabled"]
     if mode == "video":
         switches.append("subtitles_enabled")
     for name in switches:
         if type(getattr(config, name)) is not bool:
             raise DownloadError(f"请将 {name} 设置为 True 或 False。")
+    if config.multithread_enabled and (
+        type(config.download_connections) is not int or not 1 <= config.download_connections <= 16
+    ):
+        raise DownloadError("download_connections 必须是 1～16 的整数。")
     if mode == "video":
-        resolution_height(config.video_max_resolution)
+        resolution_limit(config.video_max_resolution)
         if config.subtitles_enabled:
             subtitle_language_pattern(config.subtitle_languages)
     return replace(
@@ -260,35 +294,17 @@ def move_file(source: Path, destination: Path, *, overwrite: bool = False) -> No
     source.unlink()
 
 
-def cleanup_download_files(directory: Path, output_directory: Path) -> None:
-    # 不自动删除整个工作目录：失败的源媒体需要保留，同名冲突时留在原处并提示。
-    metadata = directory / ".metadata"
+def cleanup_download_files(directory: Path) -> None:
+    """清理本次所有中间文件；成功、失败及可捕获的中断均调用，不触碰下载目录。"""
+    # 仅清理本次创建的私有工作目录；成品已在处理成功后移入下载目录。
+    # .part、.aria2、未合并音视频和转码临时文件全部删除，即使下载或处理失败也不保留。
+    # 断电 / SIGKILL 无法执行清理；文件系统拒绝删除时会报告残留路径。
     try:
-        if metadata.exists():
-            shutil.rmtree(metadata)
-    except OSError as error:
-        say(f"无法清理临时元数据：{metadata}：{error}", error=True)
-    try:
-        artifacts = sorted(directory.iterdir())
+        shutil.rmtree(directory)
     except FileNotFoundError:
-        return
+        pass
     except OSError as error:
-        say(f"无法读取临时目录，请检查：{directory}：{error}", error=True)
-        return
-    for artifact in artifacts:
-        if not artifact.is_file():
-            continue
-        try:
-            if artifact.suffix.lower() in IMAGE_EXTENSIONS:
-                artifact.unlink()
-            else:
-                move_file(artifact, output_directory / artifact.name)
-        except (OSError, DownloadError) as error:
-            say(f"未完成文件保留在：{artifact}：{error}", error=True)
-    try:
-        directory.rmdir()
-    except OSError:
-        say(f"临时目录仍有未清理的文件，请检查：{directory}", error=True)
+        say(f"无法清理本次临时文件，请手动检查：{directory}：{error}", error=True)
 
 
 def temporary_media(work_directory: Path) -> Path:
@@ -428,7 +444,7 @@ def extract_metadata(command, common_args, config: Config, mode: str, url: str, 
 
 
 def process_url(
-    config: Config, mode: str, max_height: Optional[int], url: str,
+    config: Config, mode: str, max_resolution: Optional[int], url: str,
     js_runtime: str, upload_destination: str, directory: Path,
 ) -> None:
     metadata = directory / ".metadata"
@@ -441,11 +457,12 @@ def process_url(
         command += ["bestaudio"]
     else:
         command += [
-            f"bv*[height<={max_height}]+ba/b[height<={max_height}]",
-            "--format-sort-force", "--format-sort", "height",
+            "bv*+ba/b",
+            "--format-sort-force", "--format-sort", f"res:{max_resolution}",
         ]
     common_args = [
         "--ignore-config", "--no-playlist", "--abort-on-error",
+        "--abort-on-unavailable-fragments",
         "--no-overwrites", "--no-windows-filenames", "--no-simulate", "--check-formats",
         "--cookies", cookies,
         "--paths", f"home:{directory}", "--paths", f"temp:{directory}",
@@ -453,7 +470,15 @@ def process_url(
     ]
     if js_runtime:
         common_args += ["--js-runtimes", js_runtime]
+    if config.multithread_enabled:
+        common_args += [
+            "--downloader", "aria2c", "--downloader", "dash,m3u8:native",
+            "--downloader-args", f"aria2c:-x{config.download_connections} -s{config.download_connections} -k1M",
+            "--concurrent-fragments", str(config.download_connections),
+        ]
     filename, info = extract_metadata(command, common_args, config, mode, url, metadata)
+    if mode == "video":
+        check_video_resolution(info, max_resolution)
     extension = ".mp3" if mode == "audio" else ".mp4"
     destination = config.download_directory / Path(filename).with_suffix(extension)
     if destination.is_file():
@@ -495,16 +520,21 @@ def parse_arguments(argv: Optional[list[str]], config: Config):
 配置位于脚本顶部 Config；音频和视频共用下载目录与文件名前缀开关。
 时间戳前缀在 ID 前；缺少时间戳时该段留空。文件名非法字符由 yt-dlp 替换。
 video 下载所有配置语言的可用字幕并嵌入软字幕；字幕缺失或下载失败时跳过。
+分辨率按短边限制；4k 支持 3840×2160 横屏和 2160×3840 竖屏。
 已有 MP4 复制音视频轨嵌字幕，其他格式转 H.264/AAC；成功后删除源文件。
 audio 转 MP3，写入标题、频道名和可用封面；已有 MP3 复制音轨。
-重跑复用同名成品，更新音频标签和封面或同语言字幕；失败时保留源媒体。
+重跑复用同名成品，更新音频标签和封面或同语言字幕。
+下载或处理失败、中断时删除本次临时文件；已生成的成品保留，上传失败也保留。
+开启多连接下载需要 aria2c；连接数为每个文件的上限，频道视频仍按顺序下载。
 两种模式都强制使用 Netscape 格式 Cookie；请自行导出并及时更新。
 需要 yt-dlp、ffmpeg、ffprobe；YouTube 另需 Deno 2.3+ 或 Node.js 22+。
 yt-dlp 请手动下载官方独立可执行文件并加入 PATH；上传需要配置好 rclone 远端。
 
 下载目录：{config.download_directory}
 Cookie 文件：{config.cookies_file}
-视频高度上限：{config.video_max_resolution}
+视频分辨率上限（按短边）：{config.video_max_resolution}
+多连接下载开关：{config.multithread_enabled}
+下载连接数上限：{config.download_connections}
 文件名时间戳开关：{config.filename_timestamp_enabled}
 文件名 ID 开关：{config.filename_id_enabled}
 字幕下载开关：{config.subtitles_enabled}
@@ -519,7 +549,7 @@ Cookie 文件：{config.cookies_file}
 
 
 def handle_termination(signum, _frame) -> None:
-    raise DownloadError("收到终止信号；已下载的媒体文件会保留。", 128 + signum)
+    raise DownloadError("收到终止信号；将清理本次临时文件。", 128 + signum)
 
 
 def main(argv: Optional[list[str]] = None, config: Config = CONFIG) -> int:
@@ -529,7 +559,7 @@ def main(argv: Optional[list[str]] = None, config: Config = CONFIG) -> int:
     previous_handler = signal.signal(signal.SIGTERM, handle_termination)
     try:
         config = validate_config(config, arguments.mode)
-        check_tools(config.upload_enabled)
+        check_tools(config.upload_enabled, config.multithread_enabled)
         config.download_directory.mkdir(parents=True, exist_ok=True)
         if not os.access(config.download_directory, os.W_OK | os.X_OK):
             raise DownloadError(f"下载目录不可写或无法进入：{config.download_directory}")
@@ -554,33 +584,41 @@ def main(argv: Optional[list[str]] = None, config: Config = CONFIG) -> int:
                         "  若软件源版本低于 22，请使用新版软件源：https://nodejs.org/"
                     )
         mode = arguments.mode
-        max_height = resolution_height(config.video_max_resolution) if mode == "video" else None
+        max_resolution = resolution_limit(config.video_max_resolution) if mode == "video" else None
         destination = config.audio_upload_destination if mode == "audio" else config.video_upload_destination
         if config.upload_enabled:
             check_upload_remote(destination)
         say(f"yt-dlp：{version}（{shutil.which('yt-dlp')}）")
         say("提醒：请及时将 yt-dlp 升级到最新版本，旧版本可能因网站变更而无法下载。\n"
             "新版下载：https://github.com/yt-dlp/yt-dlp/releases/latest")
-        label = "音频（MP3，含标题、频道名和可用封面）" if mode == "audio" else f"视频（MP4，高度不超过 {max_height} 像素）"
-        say(f"下载类型：{label}\n下载目录：{config.download_directory}")
+        label = (
+            "音频（MP3，含标题、频道名和可用封面）" if mode == "audio"
+            else f"视频（MP4，短边不超过 {max_resolution} 像素）"
+        )
+        say(f"下载类型：{label}\n下载目录：{config.download_directory}\nCookie 文件：{config.cookies_file}")
+        say(
+            f"多连接下载：开启（aria2c，每个文件最多 {config.download_connections} 个连接，"
+            f"分片并发 {config.download_connections}）"
+            if config.multithread_enabled else "多连接下载：关闭"
+        )
         say(f"文件名时间戳开关：{config.filename_timestamp_enabled}\n文件名 ID 开关：{config.filename_id_enabled}")
         if mode == "video":
             say(f"字幕下载开关：{config.subtitles_enabled}\n字幕语言：{config.subtitle_languages}")
         say(f"上传目录：{destination}" if config.upload_enabled else "上传已关闭，只保存到本地。")
         for url in arguments.urls:
             directory = Path(tempfile.mkdtemp(prefix="download-media-work.")).absolute()
-            process_url(config, mode, max_height, url, js_runtime, destination, directory)
-            cleanup_download_files(directory, config.download_directory)
+            process_url(config, mode, max_resolution, url, js_runtime, destination, directory)
+            cleanup_download_files(directory)
             directory = None
         say(f"处理完成，本地成品保留在：{config.download_directory}")
         return 0
     except KeyboardInterrupt:
-        say("已中断；已下载的媒体文件会保留。", error=True)
+        say("已中断；将清理本次临时文件，已生成的成品保留。", error=True)
         return 130
     except (DownloadError, OSError, ValueError) as error:
         say(f"错误：{error}", error=True)
         if directory is not None:
-            say("下载、处理或上传失败；已下载的媒体文件会保留，后续 URL 已停止。", error=True)
+            say("下载、处理或上传失败；将清理本次临时文件，已生成的成品保留，后续 URL 已停止。", error=True)
             if config.upload_enabled:
                 destination = (
                     config.audio_upload_destination if arguments.mode == "audio"
@@ -593,8 +631,10 @@ def main(argv: Optional[list[str]] = None, config: Config = CONFIG) -> int:
                 )
         return error.status if isinstance(error, DownloadError) else 1
     finally:
+        # 即使下载、转码、上传失败或用户中断，也删除本次工作目录中的所有中间文件。
+        # 已生成的完整成品位于下载目录，上传失败不会删除这些成品。
         if directory is not None:
-            cleanup_download_files(directory, config.download_directory)
+            cleanup_download_files(directory)
         signal.signal(signal.SIGTERM, previous_handler)
 
 

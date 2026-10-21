@@ -6,6 +6,8 @@
 输出：<工作目录>/<key>.json 和 <工作目录>/download_<key>.sh。
 JSON 为从旧到新的 ID 数组；TXT 中包含某个 ID 就视为已下载，匹配区分大小写。
 频道列表须按新到旧排列，首次须完整抓取；分页失败不提交本轮新增 ID。
+开启 skip_fetch 后跳过列表请求，直接使用缓存生成下载脚本。
+临时 Cookie 副本和写文件时的中间文件均在正常退出、失败或可捕获的中断时清理。
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
 
-SCRIPT_VERSION = "0.1.0"
+SCRIPT_VERSION = "0.1.1"
 
 
 # ---- 配置：运行前按需修改 ----
@@ -41,6 +43,8 @@ class Config:
     # 或 https://space.bilibili.com/27899754/upload/video
     # YouTube 只读取 /videos，排除 Shorts、直播页及播放列表。
     channel_url: str = ""
+    # 开启后跳过频道列表请求，沿用 JSON 缓存；TXT 查重和命令生成规则不变。
+    skip_fetch: bool = False
     # 不配置（None 或空字符串）时视为空文本；已配置但文件不可读则报错。
     downloaded_txt_path: Optional[Path] = None
     # 与下载脚本相同的 Netscape 格式 Cookie；源文件只读取，不会改写。
@@ -102,6 +106,8 @@ def normalize_channel_url(url: str) -> tuple[str, str]:
 
 
 def validate_config(config: Config) -> tuple[Config, str]:
+    if type(config.skip_fetch) is not bool:
+        raise ChannelError("请将 skip_fetch 设置为 True 或 False。")
     if not isinstance(config.key, str) or not config.key.strip():
         raise ChannelError("请在顶部 Config 中配置频道昵称 key。")
     if config.key in (".", "..") or any(
@@ -119,13 +125,14 @@ def validate_config(config: Config) -> tuple[Config, str]:
     ):
         raise ChannelError("request_interval 必须是大于或等于 0 的有限秒数。")
     cookies = Path(config.cookies_file).expanduser()
-    if not cookies.is_file() or not os.access(cookies, os.R_OK) or cookies.stat().st_size == 0:
-        raise ChannelError(f"Cookie 文件不存在、不可读或为空：{cookies}")
-    if shutil.which("yt-dlp") is None:
-        raise ChannelError(
-            "缺少 yt-dlp，请手动下载官方独立可执行文件并加入 PATH：\n"
-            "https://github.com/yt-dlp/yt-dlp/releases/latest"
-        )
+    if not config.skip_fetch:
+        if not cookies.is_file() or not os.access(cookies, os.R_OK) or cookies.stat().st_size == 0:
+            raise ChannelError(f"Cookie 文件不存在、不可读或为空：{cookies}")
+        if shutil.which("yt-dlp") is None:
+            raise ChannelError(
+                "缺少 yt-dlp，请手动下载官方独立可执行文件并加入 PATH：\n"
+                "https://github.com/yt-dlp/yt-dlp/releases/latest"
+            )
     return replace(
         config, working_directory=Path(config.working_directory).expanduser(),
         cookies_file=cookies, channel_url=url,
@@ -133,7 +140,7 @@ def validate_config(config: Config) -> tuple[Config, str]:
 
 
 def stage_text(destination: Path, text: str) -> Path:
-    """在目标所在目录完整写入临时文件，供随后原子替换。"""
+    """先完整写入临时文件；写入失败或中断也会删除中间文件。"""
     descriptor, name = tempfile.mkstemp(prefix=".channel-list-", suffix=".tmp", dir=destination.parent)
     temporary = Path(name)
     try:
@@ -222,6 +229,7 @@ def collect_ids(config: Config, platform: str, cached: list[str]) -> list[str]:
     newest_first = []
     seen = set()
     # yt-dlp 可能保存收到的 Cookie；使用临时副本，避免改写用户提供的源文件。
+    # TemporaryDirectory 在成功、失败和可捕获的中断时均删除 Cookie 副本。
     with tempfile.TemporaryDirectory(prefix="channel-list-cookies-") as name:
         cookies = Path(name) / "cookies.txt"
         shutil.copyfile(config.cookies_file, cookies)
@@ -262,6 +270,7 @@ def render_commands(ids: list[str], downloaded_text: str) -> tuple[str, int]:
 
 def save_outputs(cache: Path, script: Path, ids: list[str], commands: str) -> None:
     # 两个文件先准备完毕，分别原子替换；JSON 最后提交，避免提前推进增量边界。
+    # 下方 finally 无论成功、失败或中断都清理尚未提交的中间文件。
     cache_temporary = stage_text(cache, json.dumps(ids, ensure_ascii=False, indent=2) + "\n")
     try:
         script_temporary = stage_text(script, commands)
@@ -289,9 +298,11 @@ def main(argv: Optional[list[str]] = None, config: Config = CONFIG) -> int:
 默认工作目录为 ~/Downloads。频道 URL 和昵称 key 必须配置。
 YouTube 仅支持频道首页或 /videos，不收集 Shorts、直播页及播放列表。
 <key>.json 是从旧到新的 ID 数组；下载命令也按旧到新输出，每次重新生成。
+skip_fetch=True 时跳过请求，使用现有 JSON；无需 Cookie 或 yt-dlp，其他处理不变。
+JSON 不存在时仍创建空数组；跳过请求后会生成没有下载命令的脚本。
 TXT 按 ID 原样包含匹配、区分大小写；不配置路径时所有 ID 都会生成命令。
 脚本只收集 ID 和写出命令，下载脚本由用户另行运行。
-需要独立的 yt-dlp 和 Netscape 格式 Cookie；分页失败保留原有清单和下载脚本。
+请求频道列表需要独立的 yt-dlp 和 Netscape 格式 Cookie；分页失败保留原有清单和下载脚本。
 增量依赖列表顺序稳定和缓存完整；旧视频重新公开等情况需要重新完整扫描。""",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {SCRIPT_VERSION}")
@@ -305,8 +316,13 @@ TXT 按 ID 原样包含匹配、区分大小写；不配置路径时所有 ID �
         script = config.working_directory / f"download_{config.key}.sh"
         cached = load_cache(cache, platform)
         downloaded_text = read_downloaded_text(config.downloaded_txt_path)
-        say(f"频道：{config.key}\n视频页：{config.channel_url}\n缓存已有 {len(cached)} 个 ID，开始请求列表。")
-        ids = collect_ids(config, platform, cached)
+        say(f"频道：{config.key}\n视频页：{config.channel_url}")
+        if config.skip_fetch:
+            say(f"缓存已有 {len(cached)} 个 ID，skip_fetch 已开启，跳过请求列表。")
+            ids = cached
+        else:
+            say(f"缓存已有 {len(cached)} 个 ID，开始请求列表。")
+            ids = collect_ids(config, platform, cached)
         commands, count = render_commands(ids, downloaded_text)
         save_outputs(cache, script, ids, commands)
         say(f"完成：共 {len(ids)} 个 ID，新增 {len(ids) - len(cached)} 个，"
