@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
+# 已停止维护，仅保留作参考；请使用同目录下的 download_yt.py，后续更新在 Python 版本进行。
 # 支持 YouTube 和 Bilibili：从视频 URL 下载音频或视频，
 # 保存到配置的下载目录，并按开关上传到 rclone。
 # 兼容 Bash 3.2 及以上版本（包括 macOS 自带的 Bash）。
 
-readonly script_version='0.2.0'
+readonly script_version='0.2.2'
 
 # ---- 配置：运行前按需修改 ----
+# 音频和视频共用文件名前缀开关，分别控制时间戳和 ID；两者都开启时为「timestamp_id_title.扩展名」。
+# timestamp 使用视频发布时间的 Unix 秒级时间戳；网站未提供时该段留空。
+readonly filename_timestamp_enabled=false
+readonly filename_id_enabled=true
+
 # 仅 video 模式下载字幕；全部嵌入为可开关、可切换的软字幕，不烧录到画面。
 # 关闭下载后，源视频已经包含的字幕仍会保留。
 readonly subtitles_enabled=true
@@ -64,13 +70,14 @@ readonly video_max_resolution='1080p'
 # - 音频和视频均在处理成功、保存成品后删除源文件；转码失败时保留源文件。
 #
 # 文件与失败处理：
-# - 成品命名为「原视频标题.扩展名」；文件系统不允许的字符由 yt-dlp 替换。
+# - 成品按顶部两个开关添加 timestamp_ 和 id_ 前缀；时间戳在 ID 前，默认命名为「id_title.扩展名」。
+#   文件系统不允许的字符由 yt-dlp 替换。
 # - 上传使用 rclone copy，音频和视频各用自己的目标目录，本地成品始终保留。
 # - 先提取信息，再复用同名成品或按提取结果下载，避免重复解析网页。
 # - 下载及后处理使用独立临时目录，完成后移入下载目录；退出时清理临时图片、字幕和元数据。
 # - 失败时保留已下载的媒体文件，移入下载目录；遇到同名冲突则留在临时目录并提示位置。
 # - 除跳过不可下载的字幕外，任一步失败都会停止后续 URL，返回非零退出码；处理失败的文件不会上传。
-# - 重跑时复用同名成品；音频会更新标签和封面。不同视频同名时应配置不同下载目录。
+# - 重跑时复用同名成品；音频会更新标签和封面。关闭 ID 前缀时，不同视频同名应配置不同下载目录。
 # - yt-dlp 缺失时提示手动下载官方二进制，其余工具逐项给出 apt 安装命令。
 
 set -euo pipefail
@@ -85,7 +92,8 @@ usage() {
         '不存在或下载失败的字幕会跳过，不影响其他字幕和视频下载。' \
         '下载字幕和源视频的文字字幕均嵌入为软字幕；已是 MP4 时复制音视频轨，临时字幕在结束后清理。' \
         '音频和视频均由脚本直接调用 FFmpeg 转码，并实时显示处理进度。' \
-        '必须指定 audio 或 video；文件按视频标题命名，保存到配置的下载目录。' \
+        '必须指定 audio 或 video；文件保存到配置的下载目录。' \
+        '文件名前缀由 filename_timestamp_enabled 和 filename_id_enabled 分别控制；时间戳在 ID 前。' \
         '音频和视频共用 download_directory；目录不存在时自动创建。' \
         '两种模式都强制使用脚本顶部配置的 Netscape 格式 Cookie 文件。' \
         '需要 yt-dlp、ffmpeg、ffprobe；YouTube 另需 Deno 2.3+ 或 Node.js 22+。' \
@@ -93,6 +101,7 @@ usage() {
         '开启上传时需要 rclone，并事先用 rclone config 配置对应远端。'
     printf '下载目录：%s\nCookie 文件：%s\n视频高度上限：%s\n' \
         "$download_directory" "$cookies_file" "$video_max_resolution"
+    printf '文件名时间戳开关：%s\n文件名 ID 开关：%s\n' "$filename_timestamp_enabled" "$filename_id_enabled"
     printf '上传开关：%s\n音频上传目录：%s\n视频上传目录：%s\n' \
         "$upload_enabled" "$audio_upload_destination" "$video_upload_destination"
     printf '字幕下载开关：%s\n字幕语言：%s\n' "$subtitles_enabled" "$subtitle_languages"
@@ -347,6 +356,13 @@ process_video() {
 process_url() {
     local mode=$1 max_height=$2 url=$3 js_runtime=$4 upload_destination=$5
     local metadata_directory="$download_tmp_dir/.metadata"
+    local filename_template='%(title)s.%(ext)s'
+    if [[ "$filename_id_enabled" == true ]]; then
+        filename_template="%(id)s_$filename_template"
+    fi
+    if [[ "$filename_timestamp_enabled" == true ]]; then
+        filename_template="%(timestamp|)s_$filename_template"
+    fi
     mkdir -p -- "$metadata_directory" || return 1
     local -a download_command common_args metadata_args
     if [[ "$mode" == audio ]]; then
@@ -359,7 +375,7 @@ process_url() {
         --no-overwrites --no-windows-filenames --no-simulate --check-formats
         --cookies "$cookies_file"
         --paths "home:$download_tmp_dir" --paths "temp:$download_tmp_dir"
-        --paths "thumbnail:$metadata_directory" --output '%(title)s.%(ext)s'
+        --paths "thumbnail:$metadata_directory" --output "$filename_template"
     )
     [[ -z "$js_runtime" ]] || common_args+=(--js-runtimes "$js_runtime")
     metadata_args=(--skip-download --write-info-json --output "infojson:$metadata_directory/media.%(ext)s"
@@ -460,6 +476,14 @@ main() {
     [[ -f "$cookies_file" ]] || die "Cookie 文件不存在：$cookies_file；请先导出 Cookie 或修改脚本顶部路径。"
     [[ -r "$cookies_file" && -s "$cookies_file" ]] || die "Cookie 文件不可读或为空：$cookies_file"
     [[ -n "$download_directory" ]] || die 'download_directory 不能为空。'
+    case "$filename_timestamp_enabled" in
+        true|false) ;;
+        *) die '请将 filename_timestamp_enabled 设置为 true 或 false。' ;;
+    esac
+    case "$filename_id_enabled" in
+        true|false) ;;
+        *) die '请将 filename_id_enabled 设置为 true 或 false。' ;;
+    esac
     case "$upload_enabled" in
         true|false) ;;
         *) die '请将 upload_enabled 设置为 true 或 false。' ;;
@@ -532,6 +556,7 @@ main() {
         '提醒：请及时将 yt-dlp 升级到最新版本，旧版本可能因网站变更而无法下载。' \
         '新版下载：https://github.com/yt-dlp/yt-dlp/releases/latest'
     printf '下载类型：%s\n下载目录：%s\n' "$mode_label" "$download_directory"
+    printf '文件名时间戳开关：%s\n文件名 ID 开关：%s\n' "$filename_timestamp_enabled" "$filename_id_enabled"
     if [[ "$mode" == video ]]; then
         printf '字幕下载开关：%s\n字幕语言：%s\n' "$subtitles_enabled" "$subtitle_languages"
     fi
