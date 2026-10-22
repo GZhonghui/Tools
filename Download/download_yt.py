@@ -4,6 +4,9 @@
 Python 3.9+，仅使用标准库；下载、转码和上传仍调用独立的命令行工具。
 用法：python3 Download/download_yt.py <audio|video> "URL" ["URL" ...]
 
+下载完成后，可用 python3 Media/check_videos.py 完整解码检查本地视频。
+先将检查脚本的 video_directory 设为下载目录，并配置独立的 report_file 保存检查报告。
+
 中间文件不保留：成功、失败，以及 Ctrl+C / SIGTERM 中断时，均清理本次工作目录。
 清理范围包括 .part、.aria2、未合并音视频、转码文件、字幕、封面、元数据和 Cookie 副本；
 不会把中间文件移入下载目录，也不保留用于下次续传。只保留处理完成的成品，上传失败也保留。
@@ -529,6 +532,8 @@ audio 转 MP3，写入标题、频道名和可用封面；已有 MP3 复制音�
 两种模式都强制使用 Netscape 格式 Cookie；请自行导出并及时更新。
 需要 yt-dlp、ffmpeg、ffprobe；YouTube 另需 Deno 2.3+ 或 Node.js 22+。
 yt-dlp 请手动下载官方独立可执行文件并加入 PATH；上传需要配置好 rclone 远端。
+下载完成后，可运行 python3 Media/check_videos.py 检查本地视频。
+先配置检查脚本的 video_directory 为下载目录，以及独立的 report_file；检查不会修改视频。
 
 下载目录：{config.download_directory}
 Cookie 文件：{config.cookies_file}
