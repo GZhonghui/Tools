@@ -4,9 +4,10 @@
 # 可从任意工作目录执行；BACKUP_DIR 若为相对路径，以本脚本所在目录为基准。
 # 流程：停止（最多等 120 秒）-> 等 30 秒 -> 保留两个旧备份 -> 备份 -> 等 30 秒 -> 启动。
 # 备份文件为 tar.gz，文件名和日志时间均使用日本时间；成功后共保留三个备份。
+# 备份成功日志包含文件名、完整路径和压缩后文件大小（易读单位及精确字节数）。
 # 退出码：停止、清理旧备份、归档、恢复启动等步骤全部成功才返回 0；失败或中断返回非零。
 # 出错后仍会尝试恢复原先运行的容器，但恢复成功不会把本次失败改为成功。
-# 运行环境：Linux，依赖 Docker、flock、GNU find/sort；当前账户需能操作 Docker。
+# 运行环境：Linux，依赖 Docker、flock、GNU find/sort/stat/numfmt；当前账户需能操作 Docker。
 set -Eeuo pipefail
 umask 077
 
@@ -39,6 +40,8 @@ prepare() {
     fi
     command -v docker >/dev/null
     command -v flock >/dev/null
+    command -v stat >/dev/null
+    command -v numfmt >/dev/null
     docker info >/dev/null
     docker volume inspect "$VOLUME_NAME" >/dev/null
 
@@ -132,7 +135,7 @@ prune_backups() {
 }
 
 backup_volume() {
-    local filename destination
+    local filename destination size_bytes size_readable
     filename="wikijs_volume_jst_$(TZ=Asia/Tokyo date '+%Y%m%d_%H%M%S').tar.gz"
     destination="$BACKUP_DIR/$filename"
     if [[ -e "$destination" ]]; then
@@ -149,7 +152,9 @@ backup_volume() {
 
     mv -- "$TEMP_FILE" "$destination"
     TEMP_FILE=""
-    log "备份得到文件 $filename，完整路径是 $destination"
+    size_bytes=$(stat -c '%s' -- "$destination")
+    size_readable=$(numfmt --to=iec-i --suffix=B "$size_bytes")
+    log "备份得到文件 $filename，大小 $size_readable（$size_bytes 字节），完整路径是 $destination"
     sleep "$WAIT_SECONDS"
 }
 
