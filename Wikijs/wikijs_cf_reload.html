@@ -1,0 +1,44 @@
+<!--
+用途：Wiki.js 的同源 fetch 请求遇到 Cloudflare 人机验证时，整页刷新。
+用法：将本文件全部内容粘贴到 Wiki.js 的 Head HTML Injection。
+包含 30 秒防循环保护；不区分阅读和编辑状态，刷新会丢失未保存内容。
+
+Wikijs 3.0.0-beta.705 在被Cloudflare阻挡的时候，不会自动刷新，导致内容无法刷新
+-->
+<script>
+(() => {
+  if (window.__wikijsCfReloadInstalled) return;
+  window.__wikijsCfReloadInstalled = true;
+
+  const originalFetch = window.fetch.bind(window);
+  const storageKey = 'wikijs_cf_last_reload';
+  let refreshing = false;
+
+  window.fetch = async (...args) => {
+    const response = await originalFetch(...args);
+    if (
+      response.headers.get('cf-mitigated') !== 'challenge' ||
+      !response.url.startsWith(window.location.origin + '/')
+    ) {
+      return response;
+    }
+
+    if (!refreshing) {
+      try {
+        const now = Date.now();
+        const last = Number(sessionStorage.getItem(storageKey) || 0);
+        if (!(now >= last && now - last < 30000)) {
+          sessionStorage.setItem(storageKey, String(now));
+          refreshing = true;
+          window.location.reload();
+        }
+      } catch {
+        // 无法保存刷新记录时，不自动刷新，以免陷入刷新循环。
+      }
+    }
+
+    // 不把挑战响应当成普通 403 交给 Wiki.js，避免误跳到权限错误页。
+    throw new Error('Cloudflare 要求重新验证，请刷新页面。');
+  };
+})();
+</script>
