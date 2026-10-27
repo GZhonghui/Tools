@@ -3,6 +3,7 @@
 # 用法：修改下方 SCRIPTS、LOG_DIR、TG_SEND_SCRIPT，然后执行 bash daily_tasks.sh。
 # 路径：可从任意目录启动；上述配置中的相对路径均相对于本脚本所在目录。
 # 每个任务在自身目录执行；退出码 0 计为成功，非零计为失败，失败后继续后续任务。
+# 相邻任务之间等待 30 秒（TASK_INTERVAL）；最后一个任务结束后直接发送报告。
 # 通知顺序：今天是否全部成功 -> 日期时间 -> 成功/总数和失败数 -> 详细日志。
 # 标准输出和错误输出写入同一日志；Telegram 消息保留换行，长日志自动分段。
 # 日志默认保存在本脚本所在目录的 logs/daily_tasks/，可通过 LOG_DIR 修改。
@@ -27,6 +28,7 @@ SCRIPTS=(
 )
 LOG_DIR="logs/daily_tasks"
 TG_SEND_SCRIPT="$HOME/scripts/tg_send.sh"
+TASK_INTERVAL=30  # 相邻任务之间等待的秒数。
 
 LOG_FILE=""
 SUCCESS_COUNT=0
@@ -131,10 +133,14 @@ send_report() {
 main() {
     log "daily_tasks.sh $SCRIPT_VERSION"
     prepare || return $?
-    local script
+    local script remaining=${#SCRIPTS[@]}
     log "每日任务开始（daily_tasks.sh $SCRIPT_VERSION），共 ${#SCRIPTS[@]} 个脚本" >> "$LOG_FILE" || return 1
     for script in "${SCRIPTS[@]}"; do
         run_task "$script" >> "$LOG_FILE" 2>&1 || return 1
+        remaining=$((remaining - 1))
+        if (( remaining > 0 )); then
+            sleep "$TASK_INTERVAL" >> "$LOG_FILE" 2>&1 || return 1
+        fi
     done
     log "全部执行结束，成功 $SUCCESS_COUNT/${#SCRIPTS[@]}，失败 $FAILED_COUNT" >> "$LOG_FILE" || return 1
 

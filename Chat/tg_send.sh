@@ -57,6 +57,7 @@ if [[ -z $message ]]; then
 fi
 
 exec curl --silent --show-error --fail-with-body \
+    --write-out '\n' \
     --connect-timeout 10 --max-time 30 \
     --request POST \
     --data-urlencode "chat_id=${TG_CHAT_ID}" \
