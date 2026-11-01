@@ -6,6 +6,16 @@
 # daily_tasks.sh 会调用本脚本发送报告，并根据本脚本的退出码判断发送是否成功。
 # 路径：可从任意目录启动；相对图片路径以当前工作目录为准。
 # 版本信息写入标准错误，标准输出仍为 Telegram 返回的 JSON。
+#
+# 获取会话 ID（Bot API 中叫 chat_id）：
+# 1. 在 Telegram 私聊机器人，点击 Start 或发送 /start。
+# 2. 浏览器访问以下 URL，将 <BOT_TOKEN> 替换为机器人 token：
+#    https://api.telegram.org/bot<BOT_TOKEN>/getUpdates
+# 3. 在 result 中找到刚发的消息，取 message.chat.id（不要取 message_id 或 update_id）。
+# 4. 将完整数字（保留可能的负号）填入 DEFAULT_CHAT_ID，或设置 TG_CHAT_ID。
+# 群聊：先把机器人加入群，在群内发送 /start@机器人用户名，再执行第 2、3 步。
+# result 为空时先发一条新消息再试；若启用了 webhook，getUpdates 不可用。
+# 官方说明：https://core.telegram.org/bots/api#getupdates
 set -euo pipefail
 
 SCRIPT_VERSION="v0.2.0"
