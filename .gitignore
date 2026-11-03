@@ -1,5 +1,8 @@
 .DS_Store
 
+# Local Telegram credentials
+weixin_unread.env
+
 # Logs
 logs
 *.log
