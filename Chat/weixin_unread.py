@@ -48,7 +48,7 @@ RED_RGB_MAX = (255, 130, 130)
 RED_MIN_DIFFERENCE = 80
 # ==================================================
 
-SCRIPT_VERSION = "0.5.1"
+SCRIPT_VERSION = "0.5.2"
 # 3001 是 Nginx 对外的 HTTPS 网页入口；8082 是容器内的 Selkies HTTP 后端。
 # 截图请求通过 docker exec 在容器内执行，127.0.0.1 指容器自身，无需映射 8082。
 # docker ps 只列声明/映射端口，因此未显示 8082 不代表它没有监听。
@@ -150,8 +150,12 @@ def format_duration(seconds):
                     ((hours, "小时"), (minutes, "分钟"), (seconds, "秒")) if value) or "0 秒"
 
 
-def reminder_message(uptime, since_last_reminder):
-    return (f"程序已经运行 {format_duration(uptime)}，现在仍在运行中，"
+def reminder_message(uptime, since_last_reminder, timestamp=None):
+    timestamp = int(time.time() if timestamp is None else timestamp)
+    jst_time = datetime.fromtimestamp(timestamp, JST).strftime("%Y-%m-%d %H:%M:%S JST")
+    return (f"Unix 时间：{timestamp}\n"
+            f"JST 时间：{jst_time}\n"
+            f"程序已经运行 {format_duration(uptime)}，现在仍在运行中，"
             f"过去 {format_duration(since_last_reminder)}内没有消息。")
 
 
