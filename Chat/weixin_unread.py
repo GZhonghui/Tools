@@ -32,16 +32,21 @@ CONTAINER_NAME = "weixin"
 POLL_INTERVAL_SECONDS = 1 * 40 * 60  # 轮询间隔，单位秒。
 REMINDER_INTERVAL_SECONDS = 18 * 60 * 60  # 无消息时的运行提醒间隔；启动满此时长后首次提醒。
 TG_ENV_FILE = Path(__file__).resolve().with_name("weixin_unread.env")
-TG_SEND_SCRIPT = Path("/home/cone/codes/Tools/Chat/tg_send.sh")
+TG_SEND_SCRIPT = Path.home() / "codes/Tools/Chat/tg_send.sh"  # 相对于当前用户的 home 目录。
 TG_RETRY_INTERVAL_SECONDS = 60  # 发送失败后等待 1 分钟再重试。
 TG_MAX_RETRIES = 3  # 首次发送失败后最多再重试 3 次，总共最多发送 4 次。
 # 4 次发送均失败时，在当前用户 home 目录 touch WEIXIN_SEND_TO_TG_FAILED。
 
+# 以下两个矩形参数专为 1024×768 桌面分辨率、微信窗口最大化状态校准，
+# 对应 Docker 镜像 lscr.io/linuxserver/weixin:1a7800ae-ls50（tag：1a7800ae-ls50）。
+# 更改分辨率、窗口状态、界面缩放或镜像版本后，需要重新核对并调整两个矩形。
 # 检测区域：左、上、右、下；右边和下边不包含在内。
-DEFAULT_ROI = (0, 120, 175, 320)
+# 覆盖左侧消息图标及其右上角角标，避开会话列表里的头像。
+DEFAULT_ROI = (0, 85, 60, 145)
 MIN_RED_PIXELS = 50
 # 通知附图区域：左、上、右、下；超出截图右/下边界时自动裁到边界。
-NOTIFICATION_ROI = (0, 0, 640, 780)
+# 左上角 300×410，包含文件传输助手及前四个会话。
+NOTIFICATION_ROI = (0, 0, 300, 410)
 # 红色判定：各通道在以下闭区间内，且 R 至少比 G、B 高 RED_MIN_DIFFERENCE。
 RED_RGB_MIN = (200, 0, 0)
 RED_RGB_MAX = (255, 130, 130)
