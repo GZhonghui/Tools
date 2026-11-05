@@ -29,6 +29,7 @@ SCRIPTS=(
 LOG_DIR="logs/daily_tasks"
 TG_SEND_SCRIPT="$HOME/scripts/tg_send.sh"
 TASK_INTERVAL=30  # 相邻任务之间等待的秒数。
+# ---------- 配置结束 ----------
 
 LOG_FILE=""
 SUCCESS_COUNT=0

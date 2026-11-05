@@ -22,6 +22,7 @@ BACKUP_IMAGE="ubuntu:24.04"
 STOP_TIMEOUT=120  # 最多等待 120 秒；超时后 Docker 会强制停止。
 WAIT_SECONDS=30
 KEEP_OLD=2  # 备份前保留两个旧文件；本次成功后共三个。
+# ---------- 配置结束 ----------
 
 RUNNING_CONTAINERS=()
 NEED_RESTART=0
