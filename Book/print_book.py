@@ -1,5 +1,8 @@
 # 本代码部分由AI生成
 
+# Print Book
+# 将16页标准A4合并成1页A3
+
 import fitz  # PyMuPDF
 
 def scale_pdf(input_pdf_path, output_pdf_path, scale=74/210):
