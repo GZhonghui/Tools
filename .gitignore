@@ -3,6 +3,9 @@
 # Local Telegram credentials
 weixin_unread.env
 
+# Local SMTP credentials
+# /Mail/config.json
+
 # Logs
 logs
 *.log
